@@ -13,6 +13,13 @@ import gradio as gr
 import torch
 import whisper
 
+try:
+    import spaces
+
+    ZERO_GPU_AVAILABLE = True
+except ImportError:
+    ZERO_GPU_AVAILABLE = False
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -98,11 +105,18 @@ class WhatsAppConverter:
 
     def transcribe_audio(self, audio_path: str) -> Optional[str]:
         """Transcribe audio file using Whisper with automatic language detection."""
+        if ZERO_GPU_AVAILABLE:
+            return self._transcribe_audio_zerogpu(audio_path)
+        else:
+            return self._transcribe_audio_standard(audio_path)
+
+    def _transcribe_audio_standard(self, audio_path: str) -> Optional[str]:
+        """Standard transcription method."""
         try:
             # Configure transcription options based on device
             transcribe_options = {}
             if self.device == "cuda":
-                transcribe_options["fp16"] = True  # Only use FP16 on CUDA
+                transcribe_options["fp16"] = True
 
             # Load and transcribe audio
             audio = whisper.load_audio(audio_path)
@@ -115,8 +129,22 @@ class WhatsAppConverter:
             logger.error(f"Transcription failed: {e}")
             return None
 
+    @spaces.GPU(duration=30)
+    def _transcribe_audio_zerogpu(self, audio_path: str) -> Optional[str]:
+        """ZeroGPU-enabled transcription method."""
+        return self._transcribe_audio_standard(audio_path)
+
     def batch_transcribe(self, wav_paths: List[Tuple[str, str]]) -> Dict[str, str]:
         """Transcribe a batch of audio files efficiently."""
+        if ZERO_GPU_AVAILABLE:
+            return self._batch_transcribe_zerogpu(wav_paths)
+        else:
+            return self._batch_transcribe_standard(wav_paths)
+
+    def _batch_transcribe_standard(
+        self, wav_paths: List[Tuple[str, str]]
+    ) -> Dict[str, str]:
+        """Standard batch transcription method."""
         results = {}
 
         if self.device == "cuda" and len(wav_paths) > 1:
@@ -150,6 +178,14 @@ class WhatsAppConverter:
 
         return results
 
+    @spaces.GPU(duration=60)
+    def _batch_transcribe_zerogpu(
+        self, wav_paths: List[Tuple[str, str]]
+    ) -> Dict[str, str]:
+        """ZeroGPU-enabled batch transcription method."""
+        return self._batch_transcribe_standard(wav_paths)
+
+    # [Rest of the WhatsAppConverter class remains unchanged...]
     def process_chat_file(self, chat_path: str, audio_files: dict) -> str:
         """Process chat file and replace audio references with transcriptions."""
         try:
@@ -181,7 +217,6 @@ class WhatsAppConverter:
 
                 # Find chat file and audio files
                 chat_file = None
-                audio_files = {}
                 opus_files = []
 
                 for file in Path(temp_dir).rglob("*"):
@@ -195,6 +230,7 @@ class WhatsAppConverter:
 
                 total_files = len(opus_files)
                 processed_files = 0
+                audio_files = {}
 
                 # Process audio files in optimized batches
                 for i in range(0, total_files, self.batch_size):
@@ -256,6 +292,17 @@ def create_ui() -> gr.Interface:
         converter = WhatsAppConverter(whisper_model=model_name)
         return converter.process_zip(zip_file, progress)
 
+    description = """Upload a WhatsApp chat export ZIP file to convert audio messages to text.
+    Model selection guide:
+    - tiny: Fast but less accurate
+    - base: Good balance for most uses
+    - small: Better accuracy
+    - medium: High accuracy
+    - large: Best accuracy"""
+
+    if ZERO_GPU_AVAILABLE:
+        description += "\n\nNote: This Space uses ZeroGPU for dynamic GPU allocation."
+
     interface = gr.Interface(
         fn=process_file,
         inputs=[
@@ -264,18 +311,12 @@ def create_ui() -> gr.Interface:
                 choices=["tiny", "base", "small", "medium", "large"],
                 value="base",
                 label="Whisper Model",
-                info="Larger models are more accurate but slower. tiny: fastest, large: most accurate",
+                info="Larger models are more accurate but slower",
             ),
         ],
         outputs=[gr.Textbox(label="Status"), gr.File(label="Processed Chat File")],
         title="WhatsApp Chat to LLM-Ready Text Converter",
-        description="""Upload a WhatsApp chat export ZIP file to convert audio messages to text.
-        Model selection guide:
-        - tiny (1GB VRAM): Fast but less accurate
-        - base (1GB VRAM): Good balance for most uses
-        - small (2GB VRAM): Better accuracy
-        - medium (5GB VRAM): High accuracy
-        - large (10GB VRAM): Best accuracy""",
+        description=description,
     )
     return interface
 

@@ -1,6 +1,7 @@
-gradio
+gradio>=4.0.0
 openai-whisper
 ffmpeg-python
 langdetect
 torch
 numpy
+spaces
