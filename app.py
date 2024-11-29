@@ -124,7 +124,7 @@ class WhatsAppConverter:
                 )
             self.model = WhatsAppConverter._models[self.whisper_model]
 
-        self.adjust_batch_size()  # Adjust batch size within GPU context
+        self.adjust_batch_size()
         results = {}
 
         try:
@@ -133,40 +133,19 @@ class WhatsAppConverter:
                 for i in range(0, len(wav_paths), self.batch_size):
                     batch_slice = wav_paths[i : i + self.batch_size]
 
-                    # Load audio files for current batch
-                    audio_batch = []
-                    batch_opus_names = []
-
+                    # Process each audio file in the batch individually
+                    # This avoids the numpy stacking issue with different lengths
                     for opus_name, wav_path in batch_slice:
                         try:
                             audio = whisper.load_audio(wav_path)
-                            audio_batch.append(audio)
-                            batch_opus_names.append(opus_name)
-                        except Exception as e:
-                            logger.error(f"Failed to load audio {wav_path}: {e}")
-                            continue
 
-                    if not audio_batch:
-                        continue
-
-                    # Convert list of arrays to a single numpy array
-                    audio_batch = np.stack(audio_batch)
-
-                    # Transcribe batch
-                    transcribe_options = {"fp16": True}
-                    batch_results = self.model.transcribe(
-                        audio_batch, **transcribe_options
-                    )
-
-                    # Process results
-                    if isinstance(batch_results, dict):
-                        # Single result case
-                        if batch_opus_names:
-                            results[batch_opus_names[0]] = batch_results["text"].strip()
-                    else:
-                        # Multiple results case
-                        for opus_name, result in zip(batch_opus_names, batch_results):
+                            # Transcribe individual audio
+                            transcribe_options = {"fp16": True}
+                            result = self.model.transcribe(audio, **transcribe_options)
                             results[opus_name] = result["text"].strip()
+                        except Exception as e:
+                            logger.error(f"Failed to process audio {wav_path}: {e}")
+                            continue
 
             else:
                 # Process individually for CPU or single file case
