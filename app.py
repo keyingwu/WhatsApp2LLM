@@ -29,44 +29,21 @@ class WhatsAppConverter:
 
     def __init__(self, whisper_model: str = "base"):
         """Initialize the converter with specified Whisper model."""
-        # Determine device and configuration
-        if ZERO_GPU_AVAILABLE:
-            self.device = "cuda"
-            self.batch_size = 8  # Optimal for A100
-            if WhatsAppConverter._model is None:
-                WhatsAppConverter._model = whisper.load_model(whisper_model)
-        elif torch.backends.mps.is_available():
-            self.device = "cpu"  # Use CPU for Mac Silicon
-            self.batch_size = 2
-            logger.info("Mac Silicon detected, using CPU for better compatibility")
-            if WhatsAppConverter._model is None:
-                WhatsAppConverter._model = whisper.load_model(whisper_model)
-        elif torch.cuda.is_available():
-            try:
-                # Test CUDA availability
-                torch.tensor([1.0], device="cuda")
-                self.device = "cuda"
-                gpu_name = torch.cuda.get_device_properties(0).name
-                gpu_memory = torch.cuda.get_device_properties(0).total_memory / 1024**3
-                logger.info(f"Using GPU: {gpu_name} with {gpu_memory:.1f}GB memory")
-                self.batch_size = 4 if "T4" in gpu_name else 3
-                if WhatsAppConverter._model is None:
-                    WhatsAppConverter._model = whisper.load_model(whisper_model).cuda()
-            except Exception as e:
-                logger.warning(f"CUDA initialization failed, falling back to CPU: {e}")
-                self.device = "cpu"
-                self.batch_size = 2
-                if WhatsAppConverter._model is None:
-                    WhatsAppConverter._model = whisper.load_model(whisper_model)
-        else:
-            self.device = "cpu"
-            self.batch_size = 2
-            logger.info("Using CPU")
-            if WhatsAppConverter._model is None:
-                WhatsAppConverter._model = whisper.load_model(whisper_model)
-
+        if WhatsAppConverter._model is None:
+            WhatsAppConverter._model = whisper.load_model(whisper_model)
         self.model = WhatsAppConverter._model
-        self.whisper_model_name = whisper_model
+
+        # Set batch size based on environment
+        if torch.cuda.is_available():
+            gpu_name = torch.cuda.get_device_properties(0).name
+            if "A100" in gpu_name:
+                self.batch_size = 8
+            elif "T4" in gpu_name:
+                self.batch_size = 4
+            else:
+                self.batch_size = 3
+        else:
+            self.batch_size = 2
 
         # Support multiple language patterns for attachments
         self.attachment_patterns = [
@@ -108,51 +85,41 @@ class WhatsAppConverter:
             logger.error(f"FFmpeg conversion failed: {e}")
             return False
 
-    def _safe_transcribe(self, audio: torch.Tensor) -> dict:
-        """Safely transcribe audio with appropriate device handling."""
-        try:
-            if ZERO_GPU_AVAILABLE:
-                self.model = self.model.cuda()
-                result = self.model.transcribe(audio, fp16=True)
-                self.model = self.model.cpu()
-            elif self.device == "cuda":
-                result = self.model.transcribe(audio, fp16=True)
-            else:
-                result = self.model.transcribe(audio)
-            return result
-        except Exception as e:
-            logger.error(f"Transcription error: {e}")
-            # If CUDA fails, try CPU
-            if "CUDA" in str(e):
-                logger.info("Falling back to CPU transcription")
-                self.device = "cpu"
-                self.model = whisper.load_model(self.whisper_model_name)
-                return self.model.transcribe(audio)
-            raise
-
-    @spaces.GPU(duration=30) if ZERO_GPU_AVAILABLE else lambda x: x
+    @spaces.GPU
     def transcribe_audio(self, audio_path: str) -> Optional[str]:
         """Transcribe audio file using Whisper with automatic language detection."""
         try:
+            # Configure transcription options
+            transcribe_options = {}
+            if torch.cuda.is_available():
+                transcribe_options["fp16"] = True
+
+            # Load and transcribe audio
             audio = whisper.load_audio(audio_path)
-            result = self._safe_transcribe(audio)
-            logger.info(f"Detected language: {result['language']}")
+            result = self.model.transcribe(audio, **transcribe_options)
+
+            detected_language = result["language"]
+            logger.info(f"Detected language: {detected_language}")
             return result["text"].strip()
         except Exception as e:
             logger.error(f"Transcription failed: {e}")
             return None
 
-    @spaces.GPU(duration=60) if ZERO_GPU_AVAILABLE else lambda x: x
+    @spaces.GPU
     def batch_transcribe(self, wav_paths: List[Tuple[str, str]]) -> Dict[str, str]:
         """Transcribe a batch of audio files efficiently."""
         results = {}
+
         try:
-            if self.device == "cuda" and len(wav_paths) > 1:
+            if torch.cuda.is_available() and len(wav_paths) > 1:
                 # Load all audio files in batch
                 audio_batch = [
                     whisper.load_audio(wav_path) for _, wav_path in wav_paths
                 ]
-                batch_results = self._safe_transcribe(audio_batch)
+
+                # Transcribe batch with GPU optimization
+                transcribe_options = {"fp16": True, "batch_size": len(audio_batch)}
+                batch_results = self.model.transcribe(audio_batch, **transcribe_options)
 
                 # Store results
                 for (opus_name, _), result in zip(wav_paths, batch_results):
