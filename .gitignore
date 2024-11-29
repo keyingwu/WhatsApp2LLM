@@ -49,6 +49,7 @@ Icon
 # Project specific
 *.wav
 *.opus
+processed_chat_*.txt
 temp/
 
 repopack-output.txt
