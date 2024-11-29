@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import gradio as gr
+import numpy as np
 import torch
 import whisper
 
@@ -96,8 +97,6 @@ class WhatsAppConverter:
                 )
             self.model = WhatsAppConverter._models[self.whisper_model]
 
-        self.adjust_batch_size()  # Adjust batch size within GPU context
-
         try:
             # Configure transcription options
             transcribe_options = {}
@@ -126,28 +125,51 @@ class WhatsAppConverter:
             self.model = WhatsAppConverter._models[self.whisper_model]
 
         self.adjust_batch_size()  # Adjust batch size within GPU context
-
         results = {}
 
         try:
             if torch.cuda.is_available() and len(wav_paths) > 1:
-                # Load all audio files in batch
-                audio_batch = [
-                    whisper.load_audio(wav_path) for _, wav_path in wav_paths
-                ]
+                # Process in smaller batches
+                for i in range(0, len(wav_paths), self.batch_size):
+                    batch_slice = wav_paths[i : i + self.batch_size]
 
-                # Transcribe batch with GPU optimization
-                transcribe_options = {
-                    "fp16": True,
-                    "batch_size": self.batch_size,
-                }
-                batch_results = self.model.transcribe(audio_batch, **transcribe_options)
+                    # Load audio files for current batch
+                    audio_batch = []
+                    batch_opus_names = []
 
-                # Store results
-                for (opus_name, _), result in zip(wav_paths, batch_results):
-                    results[opus_name] = result["text"].strip()
+                    for opus_name, wav_path in batch_slice:
+                        try:
+                            audio = whisper.load_audio(wav_path)
+                            audio_batch.append(audio)
+                            batch_opus_names.append(opus_name)
+                        except Exception as e:
+                            logger.error(f"Failed to load audio {wav_path}: {e}")
+                            continue
+
+                    if not audio_batch:
+                        continue
+
+                    # Convert list of arrays to a single numpy array
+                    audio_batch = np.stack(audio_batch)
+
+                    # Transcribe batch
+                    transcribe_options = {"fp16": True}
+                    batch_results = self.model.transcribe(
+                        audio_batch, **transcribe_options
+                    )
+
+                    # Process results
+                    if isinstance(batch_results, dict):
+                        # Single result case
+                        if batch_opus_names:
+                            results[batch_opus_names[0]] = batch_results["text"].strip()
+                    else:
+                        # Multiple results case
+                        for opus_name, result in zip(batch_opus_names, batch_results):
+                            results[opus_name] = result["text"].strip()
+
             else:
-                # Process individually
+                # Process individually for CPU or single file case
                 for opus_name, wav_path in wav_paths:
                     transcription = self.transcribe_audio(wav_path)
                     if transcription:
