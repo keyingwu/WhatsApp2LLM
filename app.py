@@ -23,6 +23,13 @@ class WhatsAppConverter:
             r"<附件：(.+?)>",  # Chinese
             r"<attached: (.+?)>",  # English
             r"<attachment: (.+?)>",  # Alternative English
+            r"<Anhang: (.+?)>",  # German
+            r"<archivo adjunto: (.+?)>",  # Spanish
+            r"<pièce jointe : (.+?)>",  # French
+            r"<allegato: (.+?)>",  # Italian
+            r"<anexo: (.+?)>",  # Portuguese
+            r"<添付ファイル：(.+?)>",  # Japanese
+            r"<첨부파일: (.+?)>",  # Korean
         ]
 
     def convert_opus_to_wav(self, opus_path: str, wav_path: str) -> bool:
@@ -52,9 +59,11 @@ class WhatsAppConverter:
             return False
 
     def transcribe_audio(self, audio_path: str) -> Optional[str]:
-        """Transcribe audio file using Whisper."""
+        """Transcribe audio file using Whisper with automatic language detection."""
         try:
             result = self.model.transcribe(audio_path)
+            detected_language = result["language"]
+            logger.info(f"Detected language: {detected_language}")
             return result["text"].strip()
         except Exception as e:
             logger.error(f"Transcription failed: {e}")
