@@ -16,9 +16,15 @@ logger = logging.getLogger(__name__)
 
 
 class WhatsAppConverter:
-    def __init__(self, whisper_model: str = "base"):
+    _model = None  # Class variable for model caching
+
+    def __init__(
+        self, whisper_model: str = "base"
+    ):  # Changed to tiny for better performance
         """Initialize the converter with specified Whisper model."""
-        self.model = whisper.load_model(whisper_model)
+        if WhatsAppConverter._model is None:
+            WhatsAppConverter._model = whisper.load_model(whisper_model)
+        self.model = WhatsAppConverter._model
         self.attachment_patterns = [
             r"<附件：(.+?)>",  # Chinese
             r"<attached: (.+?)>",  # English
@@ -96,14 +102,39 @@ class WhatsAppConverter:
             # Find chat file and audio files
             chat_file = None
             audio_files = {}
-            total_files = 0
-            processed_files = 0
+            opus_files = []
 
             for file in Path(temp_dir).rglob("*"):
                 if file.name == "_chat.txt":
                     chat_file = str(file)
                 elif file.suffix.lower() == ".opus":
-                    total_files += 1
+                    opus_files.append(file)
+
+            total_files = len(opus_files)
+            processed_files = 0
+
+            # Process audio files in batches
+            batch_size = 3  # Adjust based on your machine's capabilities
+            for i in range(0, total_files, batch_size):
+                batch = opus_files[i : i + batch_size]
+                wav_paths = []
+
+                # Convert all files in batch to WAV
+                for file in batch:
+                    wav_path = str(file.with_suffix(".wav"))
+                    if self.convert_opus_to_wav(str(file), wav_path):
+                        wav_paths.append((file.name, wav_path))
+
+                # Process all WAV files in batch
+                for opus_name, wav_path in wav_paths:
+                    transcription = self.transcribe_audio(wav_path)
+                    if transcription:
+                        audio_files[opus_name] = transcription
+
+                    processed_files += 1
+                    if progress_callback:
+                        progress = (processed_files / total_files) * 100
+                        progress_callback(progress)
 
             if not chat_file:
                 return "Error: No _chat.txt found in ZIP file.", None
@@ -140,16 +171,32 @@ class WhatsAppConverter:
 def create_ui() -> gr.Interface:
     """Create Gradio interface."""
 
-    def process_file(zip_file: str, progress: gr.Progress) -> Tuple[str, str]:
-        converter = WhatsAppConverter()
+    def process_file(
+        zip_file: str, model_name: str, progress: gr.Progress
+    ) -> Tuple[str, str]:
+        converter = WhatsAppConverter(whisper_model=model_name)
         return converter.process_zip(zip_file, progress)
 
     interface = gr.Interface(
         fn=process_file,
-        inputs=gr.File(label="Upload WhatsApp Chat Export (ZIP)"),
+        inputs=[
+            gr.File(label="Upload WhatsApp Chat Export (ZIP)"),
+            gr.Dropdown(
+                choices=["tiny", "base", "small", "medium", "large"],
+                value="tiny",
+                label="Whisper Model",
+                info="Larger models are more accurate but slower. tiny: fastest, large: most accurate",
+            ),
+        ],
         outputs=[gr.Textbox(label="Status"), gr.File(label="Processed Chat File")],
         title="WhatsApp Chat to LLM-Ready Text Converter",
-        description="Upload a WhatsApp chat export ZIP file to convert audio messages to text.",
+        description="""Upload a WhatsApp chat export ZIP file to convert audio messages to text.
+        Model selection guide:
+        - tiny (1GB VRAM): Fast but less accurate
+        - base (1GB VRAM): Good balance for most uses
+        - small (2GB VRAM): Better accuracy
+        - medium (5GB VRAM): High accuracy
+        - large (10GB VRAM): Best accuracy""",
     )
     return interface
 
