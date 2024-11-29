@@ -25,25 +25,13 @@ logger = logging.getLogger(__name__)
 
 
 class WhatsAppConverter:
-    _model = None  # Class variable for model caching
+    _models = {}  # Class variable for model caching per model name
 
     def __init__(self, whisper_model: str = "base"):
         """Initialize the converter with specified Whisper model."""
-        if WhatsAppConverter._model is None:
-            WhatsAppConverter._model = whisper.load_model(whisper_model)
-        self.model = WhatsAppConverter._model
-
-        # Set batch size based on environment
-        if torch.cuda.is_available():
-            gpu_name = torch.cuda.get_device_properties(0).name
-            if "A100" in gpu_name:
-                self.batch_size = 8
-            elif "T4" in gpu_name:
-                self.batch_size = 4
-            else:
-                self.batch_size = 3
-        else:
-            self.batch_size = 2
+        self.model = None
+        self.whisper_model = whisper_model
+        self.batch_size = 2  # Default batch size
 
         # Support multiple language patterns for attachments
         self.attachment_patterns = [
@@ -58,6 +46,19 @@ class WhatsAppConverter:
             r"<添付ファイル：(.+?)>",  # Japanese
             r"<첨부파일: (.+?)>",  # Korean
         ]
+
+    def adjust_batch_size(self):
+        """Adjust batch size based on the available GPU."""
+        if torch.cuda.is_available():
+            gpu_name = torch.cuda.get_device_properties(0).name
+            if "A100" in gpu_name:
+                self.batch_size = 8
+            elif "T4" in gpu_name:
+                self.batch_size = 4
+            else:
+                self.batch_size = 3
+        else:
+            self.batch_size = 2
 
     def convert_opus_to_wav(self, opus_path: str, wav_path: str) -> bool:
         """Convert opus file to wav format using FFmpeg."""
@@ -88,6 +89,15 @@ class WhatsAppConverter:
     @spaces.GPU
     def transcribe_audio(self, audio_path: str) -> Optional[str]:
         """Transcribe audio file using Whisper with automatic language detection."""
+        if self.model is None:
+            if self.whisper_model not in WhatsAppConverter._models:
+                WhatsAppConverter._models[self.whisper_model] = whisper.load_model(
+                    self.whisper_model
+                )
+            self.model = WhatsAppConverter._models[self.whisper_model]
+
+        self.adjust_batch_size()  # Adjust batch size within GPU context
+
         try:
             # Configure transcription options
             transcribe_options = {}
@@ -108,6 +118,15 @@ class WhatsAppConverter:
     @spaces.GPU
     def batch_transcribe(self, wav_paths: List[Tuple[str, str]]) -> Dict[str, str]:
         """Transcribe a batch of audio files efficiently."""
+        if self.model is None:
+            if self.whisper_model not in WhatsAppConverter._models:
+                WhatsAppConverter._models[self.whisper_model] = whisper.load_model(
+                    self.whisper_model
+                )
+            self.model = WhatsAppConverter._models[self.whisper_model]
+
+        self.adjust_batch_size()  # Adjust batch size within GPU context
+
         results = {}
 
         try:
@@ -118,7 +137,10 @@ class WhatsAppConverter:
                 ]
 
                 # Transcribe batch with GPU optimization
-                transcribe_options = {"fp16": True, "batch_size": len(audio_batch)}
+                transcribe_options = {
+                    "fp16": True,
+                    "batch_size": self.batch_size,
+                }
                 batch_results = self.model.transcribe(audio_batch, **transcribe_options)
 
                 # Store results
@@ -245,15 +267,15 @@ def create_ui() -> gr.Interface:
         zip_file: str, model_name: str, progress: gr.Progress = None
     ) -> Tuple[str, str]:
         converter = WhatsAppConverter(whisper_model=model_name)
-        return converter.process_zip(zip_file, progress)
+        return converter.process_zip(zip_file.name, progress)
 
     description = """Upload a WhatsApp chat export ZIP file to convert audio messages to text.
-    Model selection guide:
-    - tiny: Fast but less accurate
-    - base: Good balance for most uses
-    - small: Better accuracy
-    - medium: High accuracy
-    - large: Best accuracy"""
+Model selection guide:
+- tiny: Fast but less accurate
+- base: Good balance for most uses
+- small: Better accuracy
+- medium: High accuracy
+- large: Best accuracy"""
 
     if ZERO_GPU_AVAILABLE:
         description += "\n\nNote: This Space uses ZeroGPU for dynamic GPU allocation."
