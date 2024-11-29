@@ -2,3 +2,5 @@ gradio
 openai-whisper
 ffmpeg-python
 langdetect
+torch
+numpy

@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import List, Optional, Tuple
 
 import gradio as gr
+import torch
 import whisper
 
 logging.basicConfig(level=logging.INFO)
@@ -18,13 +19,28 @@ logger = logging.getLogger(__name__)
 class WhatsAppConverter:
     _model = None  # Class variable for model caching
 
-    def __init__(
-        self, whisper_model: str = "base"
-    ):  # Changed to tiny for better performance
+    def __init__(self, whisper_model: str = "base"):
         """Initialize the converter with specified Whisper model."""
-        if WhatsAppConverter._model is None:
-            WhatsAppConverter._model = whisper.load_model(whisper_model)
+        # Check available devices
+        if torch.cuda.is_available():
+            self.device = "cuda"
+            logger.info("Using CUDA GPU")
+            if WhatsAppConverter._model is None:
+                WhatsAppConverter._model = whisper.load_model(whisper_model).cuda()
+        elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+            # For Mac M1/M2, use CPU for better compatibility
+            self.device = "cpu"
+            logger.info("Mac Silicon detected, using CPU for better compatibility")
+            if WhatsAppConverter._model is None:
+                WhatsAppConverter._model = whisper.load_model(whisper_model)
+        else:
+            self.device = "cpu"
+            logger.info("Using CPU")
+            if WhatsAppConverter._model is None:
+                WhatsAppConverter._model = whisper.load_model(whisper_model)
+
         self.model = WhatsAppConverter._model
+
         self.attachment_patterns = [
             r"<附件：(.+?)>",  # Chinese
             r"<attached: (.+?)>",  # English
@@ -67,7 +83,14 @@ class WhatsAppConverter:
     def transcribe_audio(self, audio_path: str) -> Optional[str]:
         """Transcribe audio file using Whisper with automatic language detection."""
         try:
-            result = self.model.transcribe(audio_path)
+            # Configure transcription options based on device
+            transcribe_options = {}
+            if self.device == "cuda":
+                transcribe_options["fp16"] = True  # Only use FP16 on CUDA
+            
+            # Transcribe with appropriate options
+            result = self.model.transcribe(audio_path, **transcribe_options)
+            
             detected_language = result["language"]
             logger.info(f"Detected language: {detected_language}")
             return result["text"].strip()
@@ -110,11 +133,16 @@ class WhatsAppConverter:
                 elif file.suffix.lower() == ".opus":
                     opus_files.append(file)
 
+            if not chat_file:
+                return "Error: No _chat.txt found in ZIP file.", None
+
             total_files = len(opus_files)
             processed_files = 0
 
+            # Adjust batch size based on device
+            batch_size = 5 if self.device in ["cuda", "mps"] else 3
+
             # Process audio files in batches
-            batch_size = 3  # Adjust based on your machine's capabilities
             for i in range(0, total_files, batch_size):
                 batch = opus_files[i : i + batch_size]
                 wav_paths = []
@@ -135,23 +163,6 @@ class WhatsAppConverter:
                     if progress_callback:
                         progress = (processed_files / total_files) * 100
                         progress_callback(progress)
-
-            if not chat_file:
-                return "Error: No _chat.txt found in ZIP file.", None
-
-            # Process audio files
-            for file in Path(temp_dir).rglob("*.opus"):
-                wav_path = str(file.with_suffix(".wav"))
-
-                if self.convert_opus_to_wav(str(file), wav_path):
-                    transcription = self.transcribe_audio(wav_path)
-                    if transcription:
-                        audio_files[file.name] = transcription
-
-                processed_files += 1
-                if progress_callback:
-                    progress = (processed_files / total_files) * 100
-                    progress_callback(progress)
 
             # Process chat file
             processed_content = self.process_chat_file(chat_file, audio_files)
@@ -202,6 +213,13 @@ def create_ui() -> gr.Interface:
 
 
 if __name__ == "__main__":
+    # Check Python version
+    import sys
+
+    if sys.version_info < (3, 10):
+        print("Error: Python 3.10 or higher is required")
+        exit(1)
+
     # Check FFmpeg installation
     try:
         subprocess.run(["ffmpeg", "-version"], capture_output=True, check=True)
@@ -211,4 +229,4 @@ if __name__ == "__main__":
 
     # Launch Gradio interface
     app = create_ui()
-    app.launch()
+    app.launch(server_name="0.0.0.0", server_port=int(os.getenv("PORT", 7860)))
